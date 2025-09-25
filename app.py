@@ -4,6 +4,7 @@ import base64
 import warnings
 from datetime import datetime
 import html
+import streamlit.components.v1 as components
 
 import pandas as pd
 import streamlit as st
@@ -79,28 +80,14 @@ st.markdown(f"""
         max-width: 1200px;
     }}
     
-    .content-box {{
-        background-color: #FFFFFF;
-        border: 1px solid #e5e7eb;
-        border-radius: 12px;
-        padding: 20px;
-        height: 100%;
-        margin-bottom: 1.5rem;
-    }}
-
-    div[data-testid="stHorizontalBlock"] {{
-        align-items: center;
-    }}
-    
     [data-testid="stSidebarCollapseButton"] {{
         display: none;
     }}
 
-    /* --- AJUSTE FINO PARA POSIÇÃO DO LOGO --- */
-    [data-testid="stSidebar"] [data-testid="stImage"] {{
-        margin-top: -14px;
+    /* Esconde a barra de ferramentas do Streamlit (ícones no canto inferior direito) */
+    [data-testid="stToolbar"] {{
+        display: none !important;
     }}
-    /* --- FIM DO AJUSTE --- */
 
     div[data-testid="stSelectbox"] div[data-baseweb="select"],
     div[data-testid="stTextInput"] input {{
@@ -113,23 +100,15 @@ st.markdown(f"""
         border-color: transparent;
     }}
     
-    .review-header {{ display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }}
-    .author-name {{ font-weight: 600; font-size: 15px; color: #111827; }}
-    .author-name a {{ color: #6b7280 !important; text-decoration: none; margin-left: 4px; }}
-    .rating-stars {{ font-size: 14px; color: #f59e0b; }}
-    .confidence-text {{ font-size: 13px; color: #6b7280; }}
-    .date-text {{ font-size: 12px; color: #9ca3af; }}
-    .review-text {{ font-size: 14px; line-height: 1.6; color: #374151; margin-bottom: 12px; }}
-    .photo-links a {{ color: {BRAND_GREEN}; font-size: 13px; margin-right: 12px; text-decoration: none; font-weight: 500; }}
-    .photo-links a:hover {{ text-decoration: underline; }}
-    .categories-text {{ font-size: 13px; color: #6b7280; margin: 12px 0 0 0; }}
-    .categories-text strong {{ color: #374151; font-weight: 500; }}
-    .no-photo-text {{ font-size: 13px; color: #9ca3af; font-style: italic; }}
-    div[data-testid="stToggle"] {{ display: flex; align-items: center; flex-direction: row-reverse; justify-content: flex-end; gap: 8px; }}
     h1 {{ font-size: 24px !important; font-weight: 700 !important; }}
-    h3 {{ font-size: 16px !important; font-weight: 500 !important; color: #4b7280; margin-bottom: 24px !important; }}
+    h3 {{ font-size: 16px !important; font-weight: 500 !important; color: #4b5563; margin-bottom: 24px !important; }}
     [data-testid="stSidebar"] {{ background-color: #ffffff; border-right: 1px solid #e5e7eb; }}
     #MainMenu, footer, header {{ visibility: hidden; }}
+    
+    div[data-testid="stHorizontalBlock"] {{
+        align-items: center;
+    }}
+    div[data-testid="stToggle"] {{ display: flex; align-items: center; flex-direction: row-reverse; justify-content: flex-end; gap: 8px; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -151,22 +130,16 @@ with st.sidebar:
     st.header("Filtros")
     
     categorias_unicas = sorted(set( c.strip() for row in df["categorias_ia"].fillna("") for c in row.split(",") if c.strip() ))
-    
     escolha = st.selectbox("Categoria", options=["TODOS"] + categorias_unicas, index=0)
-    
     mostrar_nao_usados = st.checkbox("Mostrar só não usados", value=True)
     busca = st.text_input("Buscar (nome ou texto)", value="").strip()
-    
     conf_min = 0.0
-    
     page_size = st.selectbox("Itens por página", options=[10, 20, 50, 100], index=1)
 
 # ================== FILTERING ==================
 f = df.copy()
-
 if escolha != "TODOS":
     f = f[f["categorias_ia"].fillna("").str.contains(rf"\b{escolha}\b", regex=True)]
-
 if mostrar_nao_usados:
     f = f[~f["usado"]]
 if busca:
@@ -197,55 +170,82 @@ with col2:
 start, end = (st.session_state.page - 1) * page_size, (st.session_state.page - 1) * page_size + page_size
 sub = f.iloc[start:end].copy()
 
-# ================== RENDER CARDS ============
+# ================== RENDER CARDS ==================
 for idx, row in sub.iterrows():
-    rid = str(row.get("review_id", ""))
-    autor, autor_profile, _ = parse_author(row.get("autor_nome", ""))
-    data = row.get("data_original", "") or "um mês atrás"
-    rating = row.get("rating", "")
-    rating_f = float(rating) if rating else None
-    conf = float(row.get("confianca_ia", 0.0) or 0.0)
-    cats = row.get("categorias_ia", "") or "—"
-    texto = (row.get("texto", "") or "").strip() or "_(sem texto)_"
-    imgs = split_imgs(row.get("imagens_do_review", ""))
-    review_link = row.get("review_link", "")
-    justificativa = row.get("justificativa_ia", "")
-    
-    safe_autor = html.escape(autor)
-    safe_texto = html.escape(texto).replace("\n", "<br>")
-    safe_cats = html.escape(cats)
-    safe_justificativa = html.escape(justificativa)
-    
-    if imgs:
-        links_content = ''.join([f'<a href="{u}" target="_blank">Foto {i}</a>' for i, u in enumerate(imgs, 1)])
-    else:
-        links_content = '<span class="no-photo-text">Sem Foto</span>'
-    
-    links_html = f'<div class="photo-links">{links_content}</div>'
+    # Envolve cada linha de review em um container para aplicar o espaçamento
+    with st.container():
+        rid = str(row.get("review_id", ""))
+        autor, autor_profile, _ = parse_author(row.get("autor_nome", ""))
+        data = row.get("data_original", "") or "um mês atrás"
+        rating = row.get("rating", "")
+        rating_f = float(rating) if rating else None
+        conf = float(row.get("confianca_ia", 0.0) or 0.0)
+        cats = row.get("categorias_ia", "") or "—"
+        texto = (row.get("texto", "") or "").strip() or "_(sem texto)_"
+        imgs = split_imgs(row.get("imagens_do_review", ""))
+        review_link = row.get("review_link", "")
+        justificativa = row.get("justificativa_ia", "")
+        
+        safe_autor = html.escape(autor)
+        safe_texto = html.escape(texto).replace("\n", "<br>")
+        safe_cats = html.escape(cats)
+        safe_justificativa = html.escape(justificativa)
+        
+        stars_html = f'<span class="rating-stars">{"⭐" * int(round(rating_f))} {rating_f:.1f}</span>' if rating_f else ''
+        links_html = '<div class="photo-links">' + ''.join([f'<a href="{u}" target="_blank">Foto {i}</a>' for i, u in enumerate(imgs, 1)]) + '</div>' if imgs else ''
+        
+        card_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+            body {{ margin: 0; font-family: 'Inter', sans-serif; }}
+            .content-box {{ background-color: #FFFFFF; border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; }}
+            .review-header {{ display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }}
+            .author-name {{ font-weight: 600; font-size: 15px; color: #111827; }}
+            .author-name a {{ color: #6b7280 !important; text-decoration: none; margin-left: 4px; }}
+            .rating-stars {{ font-size: 14px; color: #f59e0b; }}
+            .confidence-text {{ font-size: 13px; color: #6b7280; }}
+            .date-text {{ font-size: 12px; color: #9ca3af; }}
+            .review-text {{ font-size: 14px; line-height: 1.6; color: #374151; margin-bottom: 12px; white-space: pre-wrap; word-wrap: break-word; }}
+            .photo-links a {{ color: {BRAND_GREEN}; font-size: 13px; margin-right: 12px; text-decoration: none; font-weight: 500; }}
+            .photo-links a:hover {{ text-decoration: underline; }}
+            .categories-text {{ font-size: 13px; color: #6b7280; margin: 12px 0 0 0; }}
+            .categories-text strong {{ color: #374151; font-weight: 500; }}
+        </style>
+        </head>
+        <body>
+            <div class="content-box">
+                <div class="review-header">
+                    <span class="author-name">{safe_autor} <a href="{review_link}" target="_blank">↗</a></span>
+                    {stars_html}
+                    <span class="confidence-text">Confiança IA categorizar: {conf:.2f}</span>
+                    <span class="date-text">{data}</span>
+                </div>
+                <div class="review-text">{safe_texto}</div>
+                {links_html}
+                <div class="categories-text"><strong>Categorias IA:</strong> {safe_cats}</div>
+                {'<div class="categories-text"><strong>Justificativa da IA:</strong> ' + safe_justificativa + '</div>' if justificativa else ''}
+            </div>
+        </body>
+        </html>
+        """
+        
+        base_height = 130 
+        text_lines = len(safe_texto.split('<br>')) + (len(safe_texto) / 80)
+        card_height = base_height + (text_lines * 22) + 24 
 
-    content_html = f"""
-        <div class="review-header">
-            <span class="author-name">{safe_autor} {f'<a href="{review_link}" target="_blank">↗</a>' if review_link else ''}</span>
-            {'<span class="rating-stars">' + "⭐" * int(round(rating_f)) + f' {rating_f:.1f}</span>' if rating_f else ''}
-            <span class="confidence-text">Confiança IA categorizar: {conf:.2f}</span>
-            <span class="date-text">{data}</span>
-        </div>
-        <div class="review-text">{safe_texto}</div>
-        {links_html}
-        <div class="categories-text"><strong>Categorias IA:</strong> {safe_cats}</div>
-        {'<div class="categories-text"><strong>Justificativa da IA:</strong> ' + safe_justificativa + '</div>' if justificativa else ''}
-    """
-    
-    col1, col2 = st.columns([15, 2])
-    
-    with col1:
-        st.markdown(f'<div class="content-box">{content_html}</div>', unsafe_allow_html=True)
+        col1, col2 = st.columns([15, 2])
+        
+        with col1:
+            components.html(card_html, height=card_height)
 
-    with col2:
-        marcado = bool(row.get("usado", False))
-        novo = st.toggle("Já usei", value=marcado, key=f"usado_{rid}_{idx}")
-        if novo != marcado:
-            df.loc[df.index == idx, "usado"] = novo
-            df.loc[df.index == idx, "usado_em"] = (datetime.now().strftime("%Y-%m-%d %H:%M:%S") if novo else "")
-            save_df(df, CSV_PATH)
-            st.toast("Salvo!", icon="✅")
+        with col2:
+            marcado = bool(row.get("usado", False))
+            novo = st.toggle("Já usei", value=marcado, key=f"usado_{rid}_{idx}")
+            if novo != marcado:
+                df.loc[df.index == idx, "usado"] = novo
+                df.loc[df.index == idx, "usado_em"] = (datetime.now().strftime("%Y-%m-%d %H:%M:%S") if novo else "")
+                save_df(df, CSV_PATH)
+                st.toast("Salvo!", icon="✅")
