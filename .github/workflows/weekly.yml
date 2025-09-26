@@ -1,17 +1,20 @@
-name: Weekly reviews refresh
+name: Monthly reviews refresh
 
 on:
   schedule:
-    # Todo dia 26 às 03:00 UTC (00:00 em Brasília/UTC-3)
+    # Todo dia 26 às 03:00 UTC (00:00 em Brasília)
     - cron: "0 3 26 * *"
   workflow_dispatch: {}
 
-permissions:
-  contents: write
-
-concurrency:
-  group: weekly-reviews
-  cancel-in-progress: false
+env:
+  SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  # Limites de custo (opcionais, lidos pelo baixar_reviews.py)
+  MAX_NEW: "60"                 # teto de reviews novos por execução
+  OLD_STREAK_STOP_AT: "5"       # para após 5 IDs antigos seguidos
+  PAGE_SLEEP: "0.8"
+  RETRY_SLEEP: "2.0"
+  MAX_RETRIES: "5"
 
 jobs:
   refresh:
@@ -22,22 +25,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"  # cache integrado do setup-python (alternativa ao actions/cache)
-
-      # (Opcional) Caso prefira o cache dedicado:
-      # - name: Cache pip
-      #   uses: actions/cache@v4
-      #   with:
-      #     path: ~/.cache/pip
-      #     key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-      #     restore-keys: |
-      #       ${{ runner.os }}-pip-
 
       - name: Install deps
         run: |
@@ -48,6 +40,11 @@ jobs:
         env:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MAX_NEW: ${{ env.MAX_NEW }}
+          OLD_STREAK_STOP_AT: ${{ env.OLD_STREAK_STOP_AT }}
+          PAGE_SLEEP: ${{ env.PAGE_SLEEP }}
+          RETRY_SLEEP: ${{ env.RETRY_SLEEP }}
+          MAX_RETRIES: ${{ env.MAX_RETRIES }}
         run: |
           python run_all.py
 
@@ -57,7 +54,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [[ -n $(git status --porcelain) ]]; then
             git add -A
-            git commit -m "chore(data): weekly refresh reviews"
+            git commit -m "chore(data): monthly refresh reviews"
             git push
           else
             echo "Nada para commitar."
