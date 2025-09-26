@@ -1,23 +1,25 @@
 # baixar_reviews.py
-import os, time, json, sys, requests
+import os, sys, time, json, requests
 import pandas as pd
 from dateutil import parser as dateparser
 
-API_KEY = os.getenv("SERPAPI_KEY", "").strip()
-DATA_ID = "0x9bdb4de1ad551d:0x2222b9defd4b9462"  # Click Cannabis
-LANG = "pt-BR"
+# ===================== CONFIG ===================== #
+SERPAPI_KEY = os.getenv("SERPAPI_KEY") or ""
+# Use o data_id (mais estável). Se preferir, pode trocar por place_id=...
+DATA_ID     = "0x9bdb4de1ad551d:0x2222b9defd4b9462"
+LANG        = "pt-BR"
 
-URL = "https://serpapi.com/search.json"
-OUT_RAW = "reviews_clickcannabis.csv"
-OUT_JSONL = "reviews_clickcannabis.jsonl"  # dump bruto por página
+URL         = "https://serpapi.com/search.json"
+OUT_CSV     = "reviews_clickcannabis.csv"
+OUT_JSONL   = "reviews_clickcannabis.jsonl"
 
-# Limites e backoff via env (com defaults seguros)
-MAX_NEW = int(os.getenv("MAX_NEW", "60"))                      # teto de reviews novos por execução
-OLD_STREAK_STOP_AT = int(os.getenv("OLD_STREAK_STOP_AT", "5")) # para após N seguidos já existentes
-PAGE_SLEEP = float(os.getenv("PAGE_SLEEP", "0.8"))
-RETRY_SLEEP = float(os.getenv("RETRY_SLEEP", "2.0"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+PAGE_SLEEP  = 1.0            # pausa entre páginas
+RETRY_SLEEP = 3.0            # pausa entre tentativas
+MAX_RETRIES = 5              # tentativas por request
+MAX_PAGES   = 2000           # guarda-chuva
+OLD_STREAK_STOP = 8          # para quando encontrar N páginas seguidas só com ids já conhecidos
 
+# ===================== UTILS ====================== #
 def normalize_date(d):
     if not d:
         return ""
@@ -26,102 +28,96 @@ def normalize_date(d):
     except Exception:
         return d
 
-def load_known_ids() -> set:
-    """Lê review_id já existentes a partir do CSV de saída do app (preferência) ou do bruto."""
-    ids = set()
-    for path in ("reviews_clickcannabis_ia.csv", OUT_RAW):
-        if os.path.exists(path):
-            try:
-                df = pd.read_csv(path, usecols=["review_id"])
-                ids |= set(df["review_id"].astype(str).fillna(""))
-            except Exception:
-                pass
-    return {i for i in ids if i and i != "nan"}
+def read_known_ids(csv_path: str) -> set[str]:
+    """Carrega review_id já existentes (para parar cedo e evitar custo)."""
+    if not os.path.exists(csv_path):
+        return set()
+    try:
+        df = pd.read_csv(csv_path, usecols=["review_id"])
+        return set(df["review_id"].astype(str).dropna().str.strip().tolist())
+    except Exception:
+        return set()
 
-def fetch_all_reviews():
+def robust_get(params: dict) -> dict:
+    """GET com retries/backoff simples."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = requests.get(URL, params=params, timeout=60)
+            if r.status_code == 429:
+                # Too Many Requests — aguarda mais e tenta de novo
+                time.sleep(RETRY_SLEEP * attempt)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt == MAX_RETRIES:
+                raise
+            time.sleep(RETRY_SLEEP * attempt)
+    return {}
+
+# ===================== CORE ======================= #
+def fetch_all_reviews() -> list[dict]:
+    if not SERPAPI_KEY:
+        print("ERRO: defina SERPAPI_KEY no ambiente.", file=sys.stderr)
+        sys.exit(1)
+
+    known_ids = read_known_ids(OUT_CSV)
+    print(f"🔎 IDs conhecidos no CSV atual: {len(known_ids)}")
+
     params_base = {
         "engine": "google_maps_reviews",
         "data_id": DATA_ID,
         "hl": LANG,
-        "api_key": API_KEY,
-        "sort_by": "newest",     # muito importante p/ parar cedo
-        # "no_cache": "true",    # habilite se quiser forçar bypass de cache do SerpAPI
+        "api_key": SERPAPI_KEY,
+        "sort_by": "newest",     # pega mais recentes primeiro
+        # "no_cache": "true",
     }
 
-    known_ids = load_known_ids()
-    print(f"✔ ids conhecidos: {len(known_ids)}")
-    new_rows = []
-    seen_ids = set()
+    new_rows: list[dict] = []
+    seen_ids: set[str] = set()     # segurança intra-execução
     next_token = None
     page = 0
-    old_streak = 0
+    old_streak = 0                 # páginas sem nada novo
 
-    # para controle de custo
-    max_new = MAX_NEW
-    old_streak_cutoff = OLD_STREAK_STOP_AT
-
-    # dump bruto (útil p/ debugging)
+    # abre JSONL para depuração/backup bruto
     jf = open(OUT_JSONL, "w", encoding="utf-8")
 
     try:
         while True:
-            if max_new is not None and len(new_rows) >= max_new:
-                print(f"▶ Atingiu MAX_NEW={max_new}. Encerrando.")
-                break
-            if old_streak >= old_streak_cutoff:
-                print(f"▶ Encontrou {old_streak} antigos seguidos. Encerrando cedo para poupar créditos.")
+            page += 1
+            if page > MAX_PAGES:
+                print("⛔ MAX_PAGES atingido; encerrando.")
                 break
 
-            page += 1
             params = dict(params_base)
             if next_token:
                 params["next_page_token"] = next_token
 
-            # retries com backoff
-            delay = RETRY_SLEEP
-            for attempt in range(1, MAX_RETRIES + 1):
-                try:
-                    resp = requests.get(URL, params=params, timeout=60)
-                    if resp.status_code == 429 or 500 <= resp.status_code < 600:
-                        # backoff exponencial com jitter leve
-                        print(f"⚠ {resp.status_code} na página {page}. Tentativa {attempt}/{MAX_RETRIES}. Aguardando {delay:.1f}s…")
-                        time.sleep(delay)
-                        delay = min(delay * 1.8, 20.0)
-                        continue
-                    resp.raise_for_status()
-                    data = resp.json()
-                    break
-                except Exception as e:
-                    if attempt == MAX_RETRIES:
-                        print(f"✖ Falhou na página {page}: {e}")
-                        raise
-                    print(f"⚠ Erro na página {page}: {e} (tentativa {attempt}/{MAX_RETRIES})")
-                    time.sleep(delay)
-                    delay = min(delay * 1.8, 20.0)
+            data = robust_get(params)
+            reviews = data.get("reviews") or []
+            next_token = (data.get("serpapi_pagination") or {}).get("next_page_token")
 
-            reviews = data.get("reviews", []) or []
-            jf.write(json.dumps({"page": page, "count": len(reviews), "raw": data}, ensure_ascii=False) + "\n")
-
-            # processa
             added_this_page = 0
+
             for r in reviews:
                 rid = str(r.get("review_id") or r.get("id") or r.get("reviewId") or "").strip()
-                if not rid:
-                    continue
-                if rid in seen_ids:
+                if not rid or rid in seen_ids:
                     continue
                 seen_ids.add(rid)
 
-                # checa se já conhecemos
+                # se já conhecemos, não é “novo”
                 if rid in known_ids:
-                    old_streak += 1
                     continue
-                else:
-                    old_streak = 0  # zerar a sequência ao encontrar novo
 
-                images = r.get("images") or []
+                # >>> IGNORAR reviews sem comentário <<<
+                texto = r.get("snippet") or r.get("content") or r.get("comment")
+                if not (texto and str(texto).strip()):
+                    # pular quem só tem estrelas/foto
+                    continue
+
+                # imagens (se houver)
                 image_urls = []
-                for img in images:
+                for img in (r.get("images") or []):
                     if isinstance(img, dict):
                         image_urls.append(img.get("original") or img.get("src"))
                     elif isinstance(img, str):
@@ -134,7 +130,7 @@ def fetch_all_reviews():
                     "rating": r.get("rating"),
                     "data_original": r.get("date"),
                     "data_iso": normalize_date(r.get("date")),
-                    "texto": r.get("snippet") or r.get("content") or r.get("comment"),
+                    "texto": texto,
                     "review_link": r.get("link") or "",
                     "review_id": rid,
                     "helpful_votes": r.get("thumbs_up_count") or r.get("likes_count") or 0,
@@ -142,65 +138,60 @@ def fetch_all_reviews():
                 }
 
                 new_rows.append(row)
+                jf.write(json.dumps(r, ensure_ascii=False) + "\n")
                 added_this_page += 1
 
-                if max_new is not None and len(new_rows) >= max_new:
-                    break  # respeita teto
+            # logs
+            print(f"🟩 Página {page:>3}: +{added_this_page} novos (acumulado: {len(new_rows)})")
 
-            total = len(new_rows)
-            print(f"Página {page}: +{added_this_page} novos (acumulado: {total}).")
-            time.sleep(PAGE_SLEEP)
-
-            # paginação
-            next_token = (data.get("serpapi_pagination") or {}).get("next_page_token")
-            if not next_token:
-                print("▶ Não há próximo token. Fim.")
-                break
-
-            # heurística extra: se esta página trouxe 0 novos, aumente chance de encerrar nas próximas
+            # controle de parada:
             if added_this_page == 0:
                 old_streak += 1
+            else:
+                old_streak = 0
+
+            # se já passamos OLD_STREAK_STOP páginas sem nada novo: parar cedo
+            if old_streak >= OLD_STREAK_STOP:
+                print(f"✅ {OLD_STREAK_STOP} páginas seguidas sem novos. Encerrando cedo para poupar créditos.")
+                break
+
+            if not next_token:
+                print("🔚 Sem next_page_token. Fim.")
+                break
+
+            time.sleep(PAGE_SLEEP)
 
     finally:
         jf.close()
 
     return new_rows
 
-def save_merge(rows):
-    """Salva/mescla no OUT_RAW (CSV) sem duplicar."""
-    if not rows:
-        print("Nenhum review novo para salvar.")
-        return
+def main():
+    novos = fetch_all_reviews()
 
-    df_new = pd.DataFrame(rows)
-    if os.path.exists(OUT_RAW):
-        df_old = pd.read_csv(OUT_RAW)
-        df = pd.concat([df_old, df_new], ignore_index=True)
+    if os.path.exists(OUT_CSV):
+        df_old = pd.read_csv(OUT_CSV)
     else:
-        df = df_new
+        df_old = pd.DataFrame()
 
-    # dedupe por review_id + texto
-    keys = [c for c in ["review_id", "texto"] if c in df.columns]
+    df_new = pd.DataFrame(novos)
+    df_all = pd.concat([df_new, df_old], ignore_index=True)
+
+    # dedupe por (review_id, texto) para segurança
+    keys = [c for c in ["review_id", "texto"] if c in df_all.columns]
     if keys:
-        df = df.drop_duplicates(subset=keys, keep="first")
+        df_all = df_all.drop_duplicates(subset=keys, keep="first")
 
     # ordenar por data se possível
-    if "data_iso" in df.columns:
-        df["data_iso_sort"] = pd.to_datetime(df["data_iso"], errors="coerce", utc=True)
-        df = df.sort_values("data_iso_sort", ascending=False).drop(columns=["data_iso_sort"])
+    if "data_iso" in df_all.columns:
+        df_all["data_iso_sort"] = pd.to_datetime(df_all["data_iso"], errors="coerce", utc=True)
+        df_all = df_all.sort_values("data_iso_sort", ascending=False).drop(columns=["data_iso_sort"])
 
-    df.to_csv(OUT_RAW, index=False, encoding="utf-8-sig")
-    print(f"💾 Salvo/mesclado: {OUT_RAW} | linhas: {len(df)}")
+    df_all.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
 
-def main():
-    if not API_KEY:
-        print("Erro: defina SERPAPI_KEY no ambiente.")
-        sys.exit(1)
-
-    print(f"Rodando com limites: MAX_NEW={MAX_NEW}, OLD_STREAK_STOP_AT={OLD_STREAK_STOP_AT}")
-    rows = fetch_all_reviews()
-    save_merge(rows)
-    print("✅ download concluído.")
+    print(f"\n📥 Novos salvos nesta execução: {len(novos)}")
+    print(f"🗂  Total no CSV: {len(df_all)}")
+    print(f"💾 Arquivos gerados: {OUT_CSV}  |  {OUT_JSONL}")
 
 if __name__ == "__main__":
     main()
