@@ -2,8 +2,8 @@ name: Weekly reviews refresh
 
 on:
   schedule:
-    # Segunda-feira 06:00 UTC (03:00 em Brasília no horário de Brasília padrão)
-    - cron: "0 6 * * 1"
+    # Todo dia 26 às 03:00 UTC (00:00 em Brasília/UTC-3)
+    - cron: "0 3 26 * *"
   workflow_dispatch: {}
 
 permissions:
