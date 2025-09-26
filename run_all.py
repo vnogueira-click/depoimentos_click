@@ -4,10 +4,10 @@ import sys
 import os
 import pandas as pd
 
-RAW_CSV = "reviews_clickcannabis.csv"          # saída do baixar_reviews.py (bruto)
-FINAL_CSV = "reviews_clickcannabis_ia.csv"     # base lida pelo app / classificador
+RAW_CSV   = "reviews_clickcannabis.csv"          # saída do baixar_reviews.py (bruto)
+FINAL_CSV = "reviews_clickcannabis_ia.csv"       # base lida pelo app / classificador
 
-def run(cmd: list[str]):
+def run(cmd):
     print(">>>", " ".join(cmd), flush=True)
     subprocess.check_call(cmd)
 
@@ -29,13 +29,27 @@ def sort_and_dedupe(df: pd.DataFrame) -> pd.DataFrame:
         df = df.drop_duplicates(keep="first")
     return df
 
+def count_unclassified(df: pd.DataFrame) -> int:
+    if "categorias_ia" not in df.columns:
+        return len(df)
+    s = df["categorias_ia"].astype(str).str.strip().str.lower()
+    return (s.eq("") | s.eq("nan") | s.eq("none")).sum()
+
+def unique_ids_count(df: pd.DataFrame) -> int:
+    if "review_id" not in df.columns:
+        return len(df)
+    return df["review_id"].astype(str).nunique()
+
 def main():
-    # 1) Baixar novos reviews (o script já está otimizado para parar ao encontrar review_id já existente)
+    # 1) Baixar novos reviews
     run([sys.executable, "baixar_reviews.py"])
 
     # 2) Mesclar bruto -> final (para que a IA processe APENAS o que ainda não tem categorias_ia)
     df_raw = read_csv_safe(RAW_CSV)
     df_final_before = read_csv_safe(FINAL_CSV)
+
+    ids_before = unique_ids_count(df_final_before)
+    to_classify_before = count_unclassified(df_final_before)
 
     if df_raw.empty and df_final_before.empty:
         print("⚠️ Nenhum dado encontrado em RAW nem FINAL; nada a fazer.")
@@ -53,17 +67,30 @@ def main():
     df_merged.to_csv(FINAL_CSV, index=False, encoding="utf-8-sig")
     print(f"📦 FINAL pronto para classificar: {len(df_merged)} linhas")
 
-    # 3) Classificar com IA (o classificar_ia.py agora só trata linhas sem categorias_ia)
+    # 3) Classificar com IA (só linhas sem categorias_ia)
     run([sys.executable, "classificar_ia.py"])
 
     # 4) Sanitizar/garantir dedupe após a classificação
     df_final_after = read_csv_safe(FINAL_CSV)
-    if not df_final_after.empty:
-        df_final_after = sort_and_dedupe(df_final_after)
-        df_final_after.to_csv(FINAL_CSV, index=False, encoding="utf-8-sig")
-        print(f"✅ Pipeline concluído. Linhas finais: {len(df_final_after)}")
-    else:
+    if df_final_after.empty:
         print("⚠️ FINAL ficou vazio após classificação? Verifique os logs.")
+        return
+
+    df_final_after = sort_and_dedupe(df_final_after)
+    df_final_after.to_csv(FINAL_CSV, index=False, encoding="utf-8-sig")
+
+    # ======= RESUMO =======
+    ids_after = unique_ids_count(df_final_after)
+    new_reviews = max(ids_after - ids_before, 0)
+
+    to_classify_after = count_unclassified(df_final_after)
+    classified_now = max((to_classify_before + new_reviews) - to_classify_after, 0)
+
+    print("✅ Pipeline concluído.")
+    print(f"📊 Resumo:")
+    print(f"   • Novos reviews adicionados: {new_reviews}")
+    print(f"   • Classificados nesta rodada: {classified_now}")
+    print(f"   • Total de reviews (únicos): {ids_after}")
 
 if __name__ == "__main__":
     main()
